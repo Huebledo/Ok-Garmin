@@ -261,3 +261,4 @@ def escuchar():
 threading.Thread(target=escuchar, daemon=True).start()
 
 root.mainloop()
+
