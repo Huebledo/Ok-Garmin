@@ -57,6 +57,59 @@ def cargar_frases():
         pass
     return default
 
+# utilidades de tokenizacion y matching
+def tokenize(text):
+    # tokens en minúscula, separando por no-letras/dígitos (mantiene acentos)
+    return [t for t in re.split(r"\s+|[^\wáéíóúüñÁÉÍÓÚÜÑ]+", text.lower()) if t]
+
+def match_phrase_at(tokens, start, phrase_tokens):
+    # verifica si phrase_tokens coincide en tokens[start:start+len(phrase_tokens)]
+    if start + len(phrase_tokens) > len(tokens):
+        return False
+    return tokens[start:start+len(phrase_tokens)] == phrase_tokens
+
+def contains_ordered_pair(text, p1, p2):
+    """
+    Retorna True si en `text` aparece p1 seguida inmediatamente por p2,
+    permitiendo repeticiones de p1 entre medias.
+    Ejemplos aceptados: "ok ok garmin", "amigo ok garmin".
+    Ejemplos rechazados: "ok amigo garmin" (hay otra palabra entre p1 y p2).
+    """
+    tokens = tokenize(text)
+    p1_tokens = tokenize(p1)
+    p2_tokens = tokenize(p2)
+    if not p1_tokens or not p2_tokens:
+        return False
+
+    i = 0
+    while i < len(tokens):
+        # buscar p1 en i
+        if match_phrase_at(tokens, i, p1_tokens):
+            # avanzamos mientras encontremos repeticiones de p1
+            j = i + len(p1_tokens)
+            while j < len(tokens) and match_phrase_at(tokens, j, p1_tokens):
+                j += len(p1_tokens)
+            # ahora verificar si p2 está inmediatamente en j
+            if match_phrase_at(tokens, j, p2_tokens):
+                return True
+            # si no, seguimos buscando p1 más adelante
+            i = j
+        else:
+            i += 1
+    return False
+
+def contains_p1_alone(text, p1):
+    tokens = tokenize(text)
+    p1_tokens = tokenize(p1)
+    if not p1_tokens:
+        return False
+    i = 0
+    while i < len(tokens):
+        if match_phrase_at(tokens, i, p1_tokens):
+            return True
+        i += 1
+    return False
+
 # ventana para editar phrases.json
 def abrir_editor_frases():
     win = Toplevel(root)
@@ -104,8 +157,6 @@ def abrir_editor_frases():
 
     btn = tk.Button(win, text="Guardar", width=12, command=on_guardar_frases)
     btn.pack(pady=8)
-
-# crear botón en la ventana principal para abrir editor de frases
 
 # cargar config, crear por defecto si no existe o esta mal
 def cargar_config():
@@ -407,12 +458,32 @@ btn_config.place(x=160, y=10)
 btn_frases = tk.Button(root, text="Frases", command=abrir_editor_frases, bg="#000", fg="#fff", relief="flat", bd=0)
 btn_frases.place(x=10, y=10)
 
+# funciones de sonido centralizadas y rutas claras
+ruta_sonido_confirm = os.path.join(ASSETS_DIR, "confirm1.wav")  # sonido al detectar palabra1
+ruta_sonido_ready = os.path.join(ASSETS_DIR, "ok.wav")         # sonido al iniciar escucha (ready)
+ruta_sonido_clip = os.path.join(ASSETS_DIR, "clip.wav")        # sonido al guardar clip
+
+def reproducir_sonido(path):
+    try:
+        if path and os.path.exists(path):
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            # print para depuración
+            print("Reproduciendo:", path)
+        else:
+            print("Archivo de sonido no encontrado:", path)
+            try:
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
+    except Exception as e:
+        print("Error al reproducir sonido:", e)
+        try:
+            winsound.MessageBeep(winsound.MB_OK)
+        except Exception:
+            pass
+
 # --- reconocimiento de voz en hilo ---
 def escuchar():
-    ruta_sonido_ok = os.path.join(ASSETS_DIR, "confirm1.wav")
-    ruta_sonido_clip = os.path.join(ASSETS_DIR, "clip.wav")
-    ruta_sonido_good = os.path.join(ASSETS_DIR, "ok.wav")
-   
     # cargar modelo (igual)
     model = Model("model")
 
@@ -421,7 +492,7 @@ def escuchar():
                     input=True, frames_per_buffer=4000)
     stream.start_stream()
     print("Escuchando...")
-    winsound.PlaySound(ruta_sonido_good, winsound.SND_FILENAME)
+    reproducir_sonido(ruta_sonido_ready)
 
     primera_confirmacion = False
     tiempo_confirmacion = None
@@ -473,14 +544,10 @@ def escuchar():
             palabra1 = frases[0].strip().lower()
             palabra2 = frases[1].strip().lower()
 
-            if texto == palabra1:
-                primera_confirmacion = True
-                tiempo_confirmacion = time.time()
-                if os.path.exists(ruta_sonido_ok):
-                    winsound.PlaySound(ruta_sonido_ok, winsound.SND_FILENAME)
-
-            elif primera_confirmacion and texto == palabra2:
-                print("¡Clip guardado!")
+            # nueva lógica: detectar la secuencia p1 -> p2 incluso con repeticiones de p1
+            if contains_ordered_pair(texto, palabra1, palabra2):
+                # la secuencia completa apareció en la misma transcripción
+                print("¡Clip guardado! (secuencia detectada en una sola pasada)")
                 cfg = cargar_config()
                 raw = cfg.get("tecla_clip", "f13")
                 combo = normalizar_combinacion_para_keyboard(raw.replace(" + ", "+"))
@@ -488,10 +555,29 @@ def escuchar():
                     keyboard.press_and_release(combo)
                 except Exception as e:
                     print("Error al enviar la combinacion con keyboard:", e)
-                if os.path.exists(ruta_sonido_clip):
-                    winsound.PlaySound(ruta_sonido_clip, winsound.SND_FILENAME)
+                reproducir_sonido(ruta_sonido_clip)
                 primera_confirmacion = False
                 tiempo_confirmacion = None
+
+            else:
+                # si no vino la secuencia completa, ver si apareció p1 sola
+                if contains_p1_alone(texto, palabra1):
+                    primera_confirmacion = True
+                    tiempo_confirmacion = time.time()
+                    reproducir_sonido(ruta_sonido_confirm)
+                # si ya había p1 previa, y ahora vino p2 en otra pasada
+                elif primera_confirmacion and contains_p1_alone(texto, palabra2):
+                    print("¡Clip guardado! (confirmación por segunda frase)")
+                    cfg = cargar_config()
+                    raw = cfg.get("tecla_clip", "f13")
+                    combo = normalizar_combinacion_para_keyboard(raw.replace(" + ", "+"))
+                    try:
+                        keyboard.press_and_release(combo)
+                    except Exception as e:
+                        print("Error al enviar la combinacion con keyboard:", e)
+                    reproducir_sonido(ruta_sonido_clip)
+                    primera_confirmacion = False
+                    tiempo_confirmacion = None
 
         # timeout 
         if primera_confirmacion and tiempo_confirmacion:
@@ -510,4 +596,3 @@ def escuchar():
 threading.Thread(target=escuchar, daemon=True).start()
 
 root.mainloop()
-
