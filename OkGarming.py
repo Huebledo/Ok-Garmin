@@ -4,6 +4,7 @@ from PIL import Image, ImageTk
 import os, json, time, threading, winsound, keyboard, tempfile
 from vosk import Model, KaldiRecognizer
 import pyaudio
+import re
 
 # rutas
 BASE_DIR = os.path.dirname(__file__)
@@ -11,6 +12,7 @@ ASSETS_DIR = os.path.join(BASE_DIR, "Assets")
 ruta_fondo = os.path.join(ASSETS_DIR, "fondo.png")
 ruta_icono = os.path.join(ASSETS_DIR, "icono.ico")
 ruta_config = os.path.join(ASSETS_DIR, "config.json")
+ruta_frases = os.path.join(ASSETS_DIR, "phrases.json")
 
 # asegurar carpeta assets
 os.makedirs(ASSETS_DIR, exist_ok=True)
@@ -31,6 +33,79 @@ def escribir_json_atomico(path: str, data: dict):
         except Exception:
             pass
         raise
+
+def crear_phrases_por_defecto():
+    default = ["ok garmin", "video station", "che amigo", "che boludo", "ok amigo", "ok boludo"]
+    if not os.path.exists(ruta_frases) or os.path.getsize(ruta_frases) == 0:
+        escribir_json_atomico(ruta_frases, default)
+    return default
+
+def cargar_frases():
+    crear_phrases_por_defecto()
+    try:
+        with open(ruta_frases, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list) and all(isinstance(x, str) for x in data) and len(data) >= 2:
+                return data
+    except Exception:
+        pass
+    # si algo falla, devolver default y reescribir
+    default = ["ok garmin", "video station", "che amigo", "che boludo", "ok amigo", "ok boludo"]
+    try:
+        escribir_json_atomico(ruta_frases, default)
+    except Exception:
+        pass
+    return default
+
+# ventana para editar phrases.json
+def abrir_editor_frases():
+    win = Toplevel(root)
+    win.title("Editar frases")
+    # abrir maximizada (Windows: 'zoomed'; en otros OS puede funcionar también)
+    try:
+        win.state('zoomed')
+    except Exception:
+        # fallback: usar geometry con tamaño de pantalla
+        w = root.winfo_screenwidth()
+        h = root.winfo_screenheight()
+        win.geometry(f"{w}x{h}+0+0")
+    win.resizable(True, True)
+    win.configure(bg=COLOR_FONDO)
+    tk.Label(win, text="Esta es la lista de palabras registradas. Cada palabra minimamente similar se va a convertir en alguna de estas.", bg=COLOR_FONDO, fg="#fff").pack(pady=(8,4))
+
+    text = tk.Text(win, wrap="none", bg="#111", fg="#fff", insertbackground="#fff")
+    text.pack(fill="both", expand=True, padx=8, pady=6)
+
+    # cargar contenido actual
+    frases = cargar_frases()
+    text.delete("1.0", tk.END)
+    text.insert("1.0", json.dumps(frases, ensure_ascii=False, indent=4))
+
+    info = tk.Label(win, text="Las primeras 2 palabras son las clave. Recordar que el modelo entiende principalmente ingles. Segui el formato o te va a tirar error.", fg="White", bg=COLOR_FONDO)
+    info.pack(pady=(4,6))
+
+    def on_guardar_frases():
+        contenido = text.get("1.0", tk.END).strip()
+        try:
+            data = json.loads(contenido)
+            if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
+                raise ValueError("El JSON debe ser una lista de cadenas.")
+            if len(data) < 2:
+                raise ValueError("Debe haber al menos 2 frases (clave1 y clave2).")
+        except Exception as e:
+            messagebox.showerror("Error", f"JSON inválido:\n{e}")
+            return
+        try:
+            escribir_json_atomico(ruta_frases, data)
+            messagebox.showinfo("Guardado", "Frases guardadas correctamente.")
+            win.destroy()
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar:\n{e}")
+
+    btn = tk.Button(win, text="Guardar", width=12, command=on_guardar_frases)
+    btn.pack(pady=8)
+
+# crear botón en la ventana principal para abrir editor de frases
 
 # cargar config, crear por defecto si no existe o esta mal
 def cargar_config():
@@ -145,12 +220,12 @@ def abrir_cooldown():
     win.resizable(False, False)
     win.configure(bg=COLOR_FONDO)
 
-    tk.Label(win, text="Cooldown en segundos:", bg=COLOR_FONDO, fg="#fff").pack(pady=(12,6))
+    tk.Label(win, text="Cooldown en segundos (Valor entero):", bg=COLOR_FONDO, fg="#fff").pack(pady=(12,6))
 
     entrada_cd = tk.Entry(win, width=10, justify="center", font=("Segoe UI", 12))
     entrada_cd.pack()
 
-    info = tk.Label(win, text="Valor entero >= 1. Luego haga Guardar.", fg="gray", bg=COLOR_FONDO)
+    info = tk.Label(win, text="Cuanto tiempo para decir la 2da frase luego de la 1ra.", fg="gray", bg=COLOR_FONDO)
     info.pack(pady=(6,4))
 
     # cargar valor actual
@@ -329,28 +404,61 @@ def abrir_config():
 btn_config = tk.Button(root, text="⚙️", command=abrir_config, bg="#000", fg="#fff", relief="flat", bd=0)
 btn_config.place(x=160, y=10)
 
+btn_frases = tk.Button(root, text="Frases", command=abrir_editor_frases, bg="#000", fg="#fff", relief="flat", bd=0)
+btn_frases.place(x=10, y=10)
+
 # --- reconocimiento de voz en hilo ---
 def escuchar():
     ruta_sonido_ok = os.path.join(ASSETS_DIR, "confirm1.wav")
     ruta_sonido_clip = os.path.join(ASSETS_DIR, "clip.wav")
-
-    # cargar modelo
+    ruta_sonido_good = os.path.join(ASSETS_DIR, "ok.wav")
+   
+    # cargar modelo (igual)
     model = Model("model")
-    rec = KaldiRecognizer(model, 16000, '["ok garmin","video station", "che amigo", "che boludo", "ok amigo", "ok boludo"]')
 
     p = pyaudio.PyAudio()
     stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000,
                     input=True, frames_per_buffer=4000)
     stream.start_stream()
     print("Escuchando...")
+    winsound.PlaySound(ruta_sonido_good, winsound.SND_FILENAME)
 
     primera_confirmacion = False
     tiempo_confirmacion = None
 
+    # inicializar recognizer con frases actuales
+    # NOTA: vamos a reconstruir rec si las frases cambian en caliente
+    rec = None
+    frases_previas = None
+
     while True:
+        # intentar leer audio
         try:
             data = stream.read(4000, exception_on_overflow=False)
         except Exception:
+            continue
+
+        # recargar frases si cambiaron (permite editar en caliente)
+        try:
+            frases = cargar_frases()
+        except Exception:
+            frases = ["ok garmin", "video station"]
+        # asegurar al menos 2
+        if len(frases) < 2:
+            frases = frases + [""] * (2 - len(frases))
+
+        # si las frases cambiaron, reconstruir recognizer
+        if frases != frases_previas:
+            try:
+                grammar = json.dumps(frases, ensure_ascii=False)
+                rec = KaldiRecognizer(model, 16000, grammar)
+                frases_previas = list(frases)
+                print("Gramática actualizada:", grammar)
+            except Exception as e:
+                print("Error al crear KaldiRecognizer:", e)
+                rec = KaldiRecognizer(model, 16000)  # fallback
+
+        if rec is None:
             continue
 
         if rec.AcceptWaveform(data):
@@ -362,15 +470,17 @@ def escuchar():
             if texto:
                 print("Reconocido:", texto)
 
-            if texto == "ok garmin":
+            palabra1 = frases[0].strip().lower()
+            palabra2 = frases[1].strip().lower()
+
+            if texto == palabra1:
                 primera_confirmacion = True
                 tiempo_confirmacion = time.time()
                 if os.path.exists(ruta_sonido_ok):
                     winsound.PlaySound(ruta_sonido_ok, winsound.SND_FILENAME)
 
-            elif primera_confirmacion and texto == "video station":
+            elif primera_confirmacion and texto == palabra2:
                 print("¡Clip guardado!")
-                # leer siempre del json 
                 cfg = cargar_config()
                 raw = cfg.get("tecla_clip", "f13")
                 combo = normalizar_combinacion_para_keyboard(raw.replace(" + ", "+"))
@@ -383,9 +493,8 @@ def escuchar():
                 primera_confirmacion = False
                 tiempo_confirmacion = None
 
-         # timeout 
+        # timeout 
         if primera_confirmacion and tiempo_confirmacion:
-            # leer cooldown actual desde config (permite cambiarlo en caliente)
             try:
                 cfg_now = cargar_config()
                 cooldown = float(cfg_now.get("cooldown", 5))

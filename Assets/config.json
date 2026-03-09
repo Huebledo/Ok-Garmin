@@ -1,3 +1,6 @@
 {
-    "tecla_clip": "f13"
+    "tecla_clip": "f13",
+    "cooldown": 5,
+    "keyword1": "ok garmin",
+    "keyword2": "video station"
 }
