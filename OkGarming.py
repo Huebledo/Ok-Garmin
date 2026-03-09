@@ -34,7 +34,7 @@ def escribir_json_atomico(path: str, data: dict):
 
 # cargar config, crear por defecto si no existe o esta mal
 def cargar_config():
-    default = {"tecla_clip": "f13"}
+    default = {"tecla_clip": "f13", "cooldown": 5}
     if not os.path.exists(ruta_config) or os.path.getsize(ruta_config) == 0:
         escribir_json_atomico(ruta_config, default)
         return default
@@ -44,10 +44,15 @@ def cargar_config():
             if not isinstance(data, dict) or "tecla_clip" not in data:
                 escribir_json_atomico(ruta_config, default)
                 return default
+            # asegurar que cooldown exista y sea numérico
+            if "cooldown" not in data or not isinstance(data.get("cooldown"), (int, float)):
+                data["cooldown"] = default["cooldown"]
+                escribir_json_atomico(ruta_config, data)
             return data
     except (json.JSONDecodeError, OSError):
         escribir_json_atomico(ruta_config, default)
         return default
+
 
 # cambios para que keyboard entienda
 REEMPLAZOS = {
@@ -128,11 +133,60 @@ label_combo.place(x=10, y=170)
 def actualizar_label_combo():
     cfg = cargar_config()
     val = cfg.get("tecla_clip", "f13")
-    label_combo.config(text=f"Clip: {val.replace('+', ' + ')}")
+    cd = int(cfg.get("cooldown", 5))
+    label_combo.config(text=f"Botón: {val.replace('+', ' + ')}   CD: {cd}s")
 
 actualizar_label_combo()
 
-# ventana de configuracion
+def abrir_cooldown():
+    win = Toplevel(root)
+    win.title("Cooldown")
+    win.geometry("300x140")
+    win.resizable(False, False)
+    win.configure(bg=COLOR_FONDO)
+
+    tk.Label(win, text="Cooldown en segundos:", bg=COLOR_FONDO, fg="#fff").pack(pady=(12,6))
+
+    entrada_cd = tk.Entry(win, width=10, justify="center", font=("Segoe UI", 12))
+    entrada_cd.pack()
+
+    info = tk.Label(win, text="Valor entero >= 1. Luego haga Guardar.", fg="gray", bg=COLOR_FONDO)
+    info.pack(pady=(6,4))
+
+    # cargar valor actual
+    cfg = cargar_config()
+    entrada_cd.insert(0, str(int(cfg.get("cooldown", 5))))
+
+    def on_guardar_cd():
+        val = entrada_cd.get().strip()
+        try:
+            n = int(val)
+            if n < 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Error", "Ingrese un número entero mayor o igual a 1.")
+            return
+        # actualizar config sin perder otras claves
+        cfg2 = cargar_config()
+        cfg2["cooldown"] = n
+        try:
+            escribir_json_atomico(ruta_config, cfg2)
+            actualizar_label_combo()
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar:\n{e}")
+            return
+        messagebox.showinfo("Guardado", f"Cooldown guardado: {n} segundos")
+        win.destroy()
+
+    btn = tk.Button(win, text="Guardar", width=12, command=on_guardar_cd)
+    btn.pack(pady=8)
+
+# crear botón en la ventana principal (colócalo donde prefieras)
+btn_cd = tk.Button(root, text="Cooldown", command=abrir_cooldown, bg="#000", fg="#fff", relief="flat", bd=0)
+btn_cd.place(x=100, y=10)
+
+
+
 def abrir_config():
     config_win = Toplevel(root)
     config_win.title("Configuracion")
@@ -149,21 +203,86 @@ def abrir_config():
     info_lbl = tk.Label(config_win, text="Presione las teclas; luego haga Guardar", fg="gray", bg=COLOR_FONDO)
     info_lbl.pack()
 
-    pressed = []
+    # estructura nueva: modifiers (set) y main_key (str)
+    modifiers = set()
+    main_key = ""
 
-    # al presionar una tecla, la agrego a la lista y la muestro
+    # orden canonico para mostrar modificadores
+    MOD_ORDER = ["ctrl", "alt", "shift", "win"]
+
+    def construir_texto():
+        parts = []
+        # ordenar modificadores según MOD_ORDER
+        for m in MOD_ORDER:
+            if m in modifiers:
+                parts.append(m)
+        # añadir cualquier otro modificador no listado (por si aparece)
+        for m in sorted(modifiers):
+            if m not in MOD_ORDER:
+                parts.append(m)
+        if main_key:
+            parts.append(main_key)
+        # mostrar con mayúscula inicial en letras y con " + "
+        display = " + ".join(parts)
+        return display
+
+    # al presionar una tecla, actualizo modifiers/main_key y muestro
     def on_key(event):
-        nonlocal pressed
-        key = event.keysym.lower()
-        # si el usuario presiona Escape, limpiar la lista
-        if key == "escape":
-            pressed = []
+        nonlocal modifiers, main_key
+        key_raw = event.keysym  # usar keysym original para distinguir BackSpace, Delete, etc.
+        key_norm = normalizar_token(key_raw.lower())
+
+        # Escape: limpiar todo
+        if key_raw == "Escape":
+            modifiers.clear()
+            main_key = ""
             entrada.delete(0, tk.END)
             return
-        if key not in pressed:
-            pressed.append(key)
+
+        # Delete: limpiar todo
+        if key_raw in ("Delete", "Del"):
+            modifiers.clear()
+            main_key = ""
+            entrada.delete(0, tk.END)
+            return
+
+        # BackSpace: borrar main_key si existe, sino borrar ultimo modificador
+        if key_raw in ("BackSpace", "BackSpace"):
+            if main_key:
+                main_key = ""
+            else:
+                # eliminar ultimo modificador según orden inverso de MOD_ORDER
+                removed = None
+                for m in reversed(MOD_ORDER):
+                    if m in modifiers:
+                        removed = m
+                        break
+                if not removed and modifiers:
+                    # si no hay en MOD_ORDER, eliminar cualquiera (sorted para determinismo)
+                    removed = sorted(modifiers)[-1]
+                if removed:
+                    modifiers.discard(removed)
+            entrada.delete(0, tk.END)
+            entrada.insert(0, construir_texto())
+            return
+
+        # detectar si es modificador (usando normalizacion)
+        if key_norm in ("ctrl", "shift", "alt", "win"):
+            modifiers.add(key_norm)
+            entrada.delete(0, tk.END)
+            entrada.insert(0, construir_texto())
+            return
+
+        # ignorar teclas puramente de modificador que no normalizamos (ej: Control_L ya manejado)
+        # si es una tecla imprimible o especial (space, f1..f12, etc.) la tomo como main_key
+        # normalizar espacios y nombres comunes
+        if key_norm == "space":
+            main_key = "space"
+        else:
+            main_key = key_norm
+
         entrada.delete(0, tk.END)
-        entrada.insert(0, " + ".join(pressed))
+        entrada.insert(0, construir_texto())
 
     # al guardar tomo el texto del entry, lo normalizo y lo escribo
     def on_guardar():
@@ -184,13 +303,27 @@ def abrir_config():
         actualizar_label_combo()
         config_win.destroy()
 
-    # cargar la combinacion actual en el entry
+    # cargar la combinacion actual en el entry (y poblar modifiers/main_key)
     cfg = cargar_config()
-    entrada.insert(0, cfg.get("tecla_clip", "f13").replace("+", " + "))
+    current = cfg.get("tecla_clip", "f13")
+    entrada.insert(0, current.replace("+", " + "))
 
+    # inicializar modifiers/main_key desde la config para que BackSpace funcione correctamente
+    partes = [p.strip() for p in current.split("+") if p.strip()]
+    modifiers.clear()
+    main_key = ""
+    for p in partes:
+        tok = normalizar_token(p)
+        if tok in ("ctrl", "alt", "shift", "win"):
+            modifiers.add(tok)
+        else:
+            main_key = tok
+
+    # enlazar keypress a la ventana de configuracion (captura combinaciones)
     config_win.bind("<KeyPress>", on_key)
     btn_guardar = tk.Button(config_win, text="Guardar", width=12, command=on_guardar)
     btn_guardar.pack(pady=10)
+
 
 # boton de configuracion
 btn_config = tk.Button(root, text="⚙️", command=abrir_config, bg="#000", fg="#fff", relief="flat", bd=0)
@@ -250,12 +383,19 @@ def escuchar():
                 primera_confirmacion = False
                 tiempo_confirmacion = None
 
-        # timeout 
+         # timeout 
         if primera_confirmacion and tiempo_confirmacion:
-            if time.time() - tiempo_confirmacion > 5:
+            # leer cooldown actual desde config (permite cambiarlo en caliente)
+            try:
+                cfg_now = cargar_config()
+                cooldown = float(cfg_now.get("cooldown", 5))
+            except Exception:
+                cooldown = 5.0
+            if time.time() - tiempo_confirmacion > cooldown:
                 print("Reiniciando confirmacion...")
                 primera_confirmacion = False
                 tiempo_confirmacion = None
+
 
 # iniciar hilo de escucha
 threading.Thread(target=escuchar, daemon=True).start()
